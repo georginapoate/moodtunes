@@ -22,3 +22,26 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+venv/
+.env/
+
+# Ignore Python cache and temporary files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Ignore data (if large dataset downloaded locally, specify explicitly if needed)
+data/
+datasets/
+
+# Ignore model checkpoints or embeddings (big binary files)
+*.pt
+*.bin
+*.model
+*.joblib
+*.pkl
