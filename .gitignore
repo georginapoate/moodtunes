@@ -25,6 +25,7 @@ dist-ssr
 
 venv/
 .env/
+.env
 sklearn-env/
 
 # Ignore Python cache and temporary files

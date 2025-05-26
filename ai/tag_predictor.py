@@ -13,5 +13,5 @@ def predict_tags(prompt: str):
     return list(predicted_tags)
 
 # Example usage
-test_prompt = "im very sad"
+test_prompt = "im crying"
 print(predict_tags(test_prompt))

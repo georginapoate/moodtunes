@@ -4,9 +4,6 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import MultiLabelBinarizer
 import joblib
 
-# lets see how much time it takes to run this script
-import time
-start_time = time.time()
 print("🔄 Training genre classifier...")
 # Load and preprocess data
 df = pd.read_csv("../data/tag_dataset.csv")
@@ -30,7 +27,3 @@ clf.fit(X, Y)
 # Save model
 joblib.dump(clf, "genre_classifier.pkl")
 print("✅ Classifier and label binarizer saved.")
-
-# Print elapsed time
-elapsed_time = time.time() - start_time
-print(f"⏱️ Elapsed time: {elapsed_time:.2f} seconds")
