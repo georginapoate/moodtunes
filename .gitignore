@@ -47,3 +47,5 @@ datasets/
 *.model
 *.joblib
 *.pkl
+
+API_KEYS
