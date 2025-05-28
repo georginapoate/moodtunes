@@ -39,7 +39,7 @@ __pycache__/
 .ipynb_checkpoints/
 
 # Ignore data (if large dataset downloaded locally, specify explicitly if needed)
-data/
+# data/
 datasets/
 
 # Ignore model checkpoints or embeddings (big binary files)
