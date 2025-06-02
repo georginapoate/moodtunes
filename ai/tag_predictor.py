@@ -13,5 +13,5 @@ def predict_tags(prompt: str):
     return list(predicted_tags)
 
 # Example usage
-test_prompt = "i woke up in the past"
+test_prompt = "i woke up in the 2010s"
 print(predict_tags(test_prompt))
