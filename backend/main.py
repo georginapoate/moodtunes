@@ -1,22 +1,29 @@
 # backend/main.py
-from fastapi import FastAPI, HTTPException, Request
+import json
+from venv import create
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orms import Session
+
+from . import crud, models, schemas
+from .database import SessionLocal, engine, create_db_and_tables, get_db
 
 from .schemas import PromptRequest, PlaylistResponse, SpotifyAuthData
 from .config import settings
+
+from .services.openai_service import get_song_recommendations_from_openai
 from .services.openai_service import extract_music_tags_from_prompt
-from .services.lastfm_service import find_tracks_by_tags as find_lastfm_tracks
-from .services.ytmusic_service import search_ytmusic_for_tracks
+from .services.lastfm_service import get_tags_for_track
+
 from .services.spotify_service import (
-    create_spotify_playlist_controller,
+    create_spotify_playlist_from_tracks,
     get_spotify_auth_url,
     handle_spotify_callback_and_get_token,
-    get_spotify_client_for_user_from_token_info, # If you store token_info
-    SpotifyOAuthError # Import the specific error
+    SpotifyOAuthError
 )
 
-import json # For potentially storing/retrieving token_info
+create_db_and_tables()  # Ensure database and tables are created at startup
 
 # --- FastAPI App Initialization ---
 app = FastAPI(
@@ -40,6 +47,7 @@ app.add_middleware(
     allow_headers=["*"],    # Allows all headers
 )
 
+# todo:
 # --- Spotify Authentication Endpoints (Simplified for Dev) ---
 # In a real app, you'd store tokens securely (e.g., in a database linked to users or secure session)
 # For now, this uses a simple file cache or relies on Spotipy's default caching.
@@ -64,18 +72,9 @@ async def spotify_callback(code: str, request: Request): # FastAPI automatically
     """
     try:
         token_info = await handle_spotify_callback_and_get_token(code)
-        
-        # VERY SIMPLIFIED token "storage" for single-developer testing.
         # DO NOT USE THIS IN PRODUCTION.
         # In production: Store token_info securely (e.g., encrypted in session, DB per user).
-        # For this example, we'll write to a temporary file or rely on Spotipy's cache.
-        # Spotipy's default cache path is often ./.cache-<username> or similar.
-        # If handle_spotify_callback_and_get_token already caches it via SpotipyOAuth, this is redundant.
         print(f"Spotify token info obtained: {token_info}")
-        # Let's assume SpotipyOAuth handles caching sufficiently for dev.
-        
-        # Redirect user back to frontend, perhaps with a success message or to a specific page
-        # The frontend can then know that authentication was successful.
         frontend_redirect_url = "http://localhost:3000/auth-success" # Example
         return RedirectResponse(f"{frontend_redirect_url}?status=spotify_auth_success")
 
@@ -89,100 +88,91 @@ async def spotify_callback(code: str, request: Request): # FastAPI automatically
 
 
 # --- Core Playlist Generation Endpoint ---
-@app.post(f"{settings.API_V1_STR}/generate-playlist", response_model=PlaylistResponse, tags=["Playlist Generation"])
-async def generate_playlist_endpoint(prompt_request: PromptRequest):
-    """
-    Generates a Spotify playlist based on a user's text prompt.
-    """
+@app.post(f"{settings.API_V1_STR}/generate-playlist", response_model=schemas.PlaylistResponse, tags=["Playlist Generation"])
+async def generate_playlist_endpoint(
+    prompt_request: PromptRequest,
+    db: Session = Depends(get_db)
+):
     print(f"Received prompt: {prompt_request.prompt}")
+    db_prompt = crud.create_prompt(db, prompt_request.prompt)
+    if not db_prompt:
+        db_prompt = crud.get_prompt_by_text(db, prompt_request.prompt)
 
-    # Step 1: Analyze Prompt with OpenAI (or your local AI if you revert)
     try:
-        extracted_tags = await extract_music_tags_from_prompt(prompt_request.prompt, max_tags=7)
-        if not extracted_tags:
-            print("OpenAI didn't return tags. This might be an issue or a very unspecific prompt.")
-            # Decide on fallback: use raw prompt for YT, or error out
-            # For now, let's proceed and see if Last.fm/YT can use an empty list or the raw prompt
+        openai_recommended_song = await get_song_recommendations_from_openai(
+            prompt_request.prompt,
+            max_songs=settings.SPOTIFY_PLAYLIST_MAX_TRACKS + 5)
+        if not openai_recommended_song:
+            raise HTTPException(status_code=404, detail="OpenAI could not recommend any songs for this prompt.")
+    except ValueError as ve:
+        raise HTTPException(status_code=503, detail=f"OpenAI error: {str(ve)}")
     except Exception as e:
         print(f"Error calling OpenAI service: {e}")
         raise HTTPException(status_code=503, detail=f"AI service unavailable or failed: {str(e)}")
     
-    print(f"OpenAI Extracted Tags: {extracted_tags}")
+    print(f"OpenAI recommended the following Songs: {openai_recommended_song}")
 
-    # Step 2: Find Songs using Last.fm with extracted tags
-    lastfm_tracks = []
-    if extracted_tags: # Only query Last.fm if we have tags
-        try:
-            # Get more tracks from Last.fm initially to have a larger pool
-            lastfm_tracks = await find_lastfm_tracks(extracted_tags, limit_per_tag=5, total_limit=30)
-            print(f"Found {len(lastfm_tracks)} tracks from Last.fm.")
-        except Exception as e:
-            print(f"Error fetching from Last.fm: {e}") # Log error but continue
+    final_list_for_spotify = []
+    song_details_for_fe = []
 
-    # Step 3: Find Songs using YouTube Music (as fallback or augmentation)
-    # Query YT Music with original prompt for broader context, or joined tags
-    yt_query = prompt_request.prompt # Using original prompt can be effective for YT Music
-    # Alternatively, if extracted_tags are good:
-    # yt_query = " ".join(extracted_tags) + " music"
-    
-    yt_tracks = []
-    try:
-        # Get a decent number of YT tracks if Last.fm results are sparse or for variety
-        yt_limit = 20 if not lastfm_tracks else 10 
-        yt_tracks = await search_ytmusic_for_tracks(yt_query, limit=yt_limit)
-        print(f"Found {len(yt_tracks)} tracks from YouTube Music.")
-    except Exception as e:
-        print(f"Error fetching from YouTube Music: {e}") # Log error but continue
+    processed_song_identifiers = set() # set for avoiding duplicates
 
-    # Step 4: Combine and Deduplicate Tracks
-    # Prioritize Last.fm tracks as they are more likely to be canonical artists/titles
-    candidate_tracks_with_source = []
-    for track in lastfm_tracks:
-        candidate_tracks_with_source.append({**track, "source": "Last.fm"})
-    for track in yt_tracks:
-        candidate_tracks_with_source.append({**track, "source": "YouTube Music"})
-
-    final_candidate_tracks = []
-    seen_identifiers = set() # (normalized_title, normalized_artist)
-
-    for track in candidate_tracks_with_source:
-        title_norm = track.get("title", "").lower().strip()
-        artist_norm = track.get("artist", "").lower().strip()
-        
-        if not title_norm or not artist_norm: # Skip tracks with missing info
+    for song in openai_recommended_song:
+        title = song.get("title")
+        artist = song.get("artist")
+        if not title or not artist:
+            print(f"Skipping song with missing title/artist: {song}")
             continue
+        
+        # Check for duplicates based on title and artist
+        identifier = f"{title.lower()} - {artist.lower()}"
+        if identifier in processed_song_identifiers:
+            print(f"Skipping duplicate song: {title} by {artist}")
+            continue
+        
+        processed_song_identifiers.add(identifier)
+        db_song = crud.get_or_create_song(db, title=title, artist=artist)
+        crud.link_prompt_to_song_with_source(db, prompt_id=db_prompt.id, song_id=db_song.id, source="openai")
 
-        identifier = (title_norm, artist_norm)
-        if identifier not in seen_identifiers:
-            final_candidate_tracks.append({
-                "title": track["title"], # Use original case for Spotify search
-                "artist": track["artist"],
-                "source": track["source"]
-            })
-            seen_identifiers.add(identifier)
+        # get tags for each song using Last.fm
+        await asyncio.sleep(0.1)  # Small delay to avoid rate limiting
+        lfm_tags = await get_tags_for_track(title, artist)
+        if lfm_tags:
+            crud.add_tags_to_song(db, db_song, lfm_tags)
+            print(f"Added tags {lfm_tags} to song {title} by {artist}")
+        else:
+            print(f"No tags found for {title} by {artist}, skipping.")
+        
+        final_list_for_spotify.append({
+            "title": title,
+            "artist": artist,
+        })
+        song_details_for_fe.append({
+            "title": title,
+            "artist": artist,
+            "tags": lfm_tags  # Include tags for the song
+        })
 
-    if not final_candidate_tracks:
-        raise HTTPException(status_code=404, detail="No tracks found from Last.fm or YouTube Music for the given prompt.")
+        if len(final_list_for_spotify) >= settings.SPOTIFY_PLAYLIST_MAX_TRACKS:
+            break
+        
+    if not final_list_for_spotify:
+        raise HTTPException(status_code=404, detail="No valid songs processed for playlist creation.")
 
-    # Limit total playlist size for Spotify
-    tracks_for_playlist = final_candidate_tracks[:settings.SPOTIFY_PLAYLIST_MAX_TRACKS] # Add SPOTIFY_PLAYLIST_MAX_TRACKS to config
-    print(f"Total unique candidate tracks for Spotify: {len(tracks_for_playlist)}")
-
-
-    # Step 5 & 6: Create Spotify Playlist
-    # This step requires the user to have authenticated with Spotify via the /spotify/login flow.
-    # The spotify_service will attempt to use a cached token.
+    # Creating the Spotify Playlist
     try:
-        playlist_url = await create_spotify_playlist_controller(
-            tracks_info=tracks_for_playlist, # List of {"title": ..., "artist": ...}
+        playlist_url = await create_spotify_playlist_from_tracks(
+            tracks_info=final_list_for_spotify, 
             playlist_name=f"MoodTunes: {prompt_request.prompt[:30]}..."
             # access_token would be passed here in a multi-user app from their session
         )
-        return PlaylistResponse(playlist_url=playlist_url, message="Playlist created successfully!")
+        return PlaylistResponse(
+            playlist_url=playlist_url,
+            message="Awesome playlist created successfully!",
+            songs=song_details_for_fe
+            )
     except SpotifyOAuthError as e:
-        # This error means Spotipy couldn't get a token (e.g., not logged in, cache expired, scope issue)
         print(f"Spotify OAuth Error during playlist creation: {e}")
-        # Frontend should interpret this as "user needs to log in to Spotify"
         raise HTTPException(
             status_code=401, # Unauthorized
             detail=f"Spotify authentication required or token invalid. Please login via /api/v1/spotify/login. Error: {str(e)}"
@@ -200,12 +190,3 @@ async def health_check():
     Simple health check endpoint.
     """
     return {"status": "ok", "message": "MoodTunes API is running!"}
-
-# --- (Optional) Load any startup data or models ---
-# For example, if you were using the local Moodify CSV:
-# from .services.moodify_service import load_moodify_dataset
-# @app.on_event("startup")
-# async def startup_event():
-#     print("Application startup: Loading necessary data...")
-#     load_moodify_dataset() # If you were using it
-#     print("Startup data loading complete.")

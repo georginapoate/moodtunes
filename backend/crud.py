@@ -69,11 +69,11 @@ def link_prompt_to_song(db: Session, prompt: models.Prompt, song: models.Song, s
         db.commit()
 
 # If using an association object for prompt_song_recommendation to store 'source'
-# from .models import prompt_song_recommendation # The table object
-# def link_prompt_to_song_with_source(db: Session, prompt_id: int, song_id: int, source: str = "openai"):
-#     # Check if exists
-#     existing_link = db.query(prompt_song_recommendation).filter_by(prompt_id=prompt_id, song_id=song_id).first()
-#     if not existing_link:
-#         stmt = prompt_song_recommendation.insert().values(prompt_id=prompt_id, song_id=song_id, source=source)
-#         db.execute(stmt)
-#         db.commit()
+from .models import prompt_song_recommendation # The table object
+def link_prompt_to_song_with_source(db: Session, prompt_id: int, song_id: int, source: str = "openai"):
+    # Check if exists
+    existing_link = db.query(prompt_song_recommendation).filter_by(prompt_id=prompt_id, song_id=song_id).first()
+    if not existing_link:
+        stmt = prompt_song_recommendation.insert().values(prompt_id=prompt_id, song_id=song_id, source=source)
+        db.execute(stmt)
+        db.commit()
