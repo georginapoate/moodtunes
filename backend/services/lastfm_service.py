@@ -7,49 +7,42 @@ network = pylast.LastFMNetwork(
     api_secret=settings.LASTFM_API_SECRET
 )
 
-async def find_tracks_by_tags(tags: List[str], limit_per_tag: int = 5) -> List[Dict[str, Any]]:
+# backend/services/lastfm_service.py
+import pylast
+from ..config import settings
+from typing import List, Optional, Dict, Any
+import asyncio
+
+# ... (network initialization as before) ...
+
+async def get_tags_for_track(title: str, artist: str) -> List[str]:
     """
-    Finds top tracks for a list of tags using Last.fm.
-    Returns a list of dicts: [{"title": "Track Title", "artist": "Artist Name"}, ...]
+    Fetches top tags for a specific track from Last.fm.
     """
-    all_tracks = []
-    seen_tracks = set() # To avoid duplicates based on (title, artist)
+    if not network:
+        print("Last.fm network not initialized.")
+        return []
 
-    for tag_name in tags:
-        try:
-            tag = network.get_tag(tag_name)
-            if not tag:
-                print(f"Tag '{tag_name}' not found on Last.fm.")
-                continue
+    try:
+        # pylast methods are synchronous, run them in a thread
+        track_obj = await asyncio.to_thread(network.get_track, artist, title)
+        if not track_obj:
+            print(f"Last.fm: Track '{title}' by '{artist}' not found.")
+            return []
 
-            # pylast.Tag.get_top_tracks returns TopItem instances
-            top_tracks_items = tag.get_top_tracks(limit=limit_per_tag)
-
-            for item in top_tracks_items:
-                track = item.item # This is a pylast.Track object
-                track_title = track.title
-                artist_name = track.artist.name
-                track_identifier = (track_title.lower(), artist_name.lower())
-
-                if track_identifier not in seen_tracks:
-                    all_tracks.append({"title": track_title, "artist": artist_name, "source": "Last.fm"})
-                    seen_tracks.add(track_identifier)
-
-        except pylast.WSError as e:
-            print(f"Last.fm API error for tag '{tag_name}': {e}")
-        except Exception as e:
-            print(f"An unexpected error occurred with tag '{tag_name}': {e}")
-            # Potentially rate limit hit, or malformed response
-            # Consider adding a small delay or backoff here if frequent.
-
-    return all_tracks
-
-# Example Usage (for testing this service directly)
-# if __name__ == "__main__":
-#     import asyncio
-#     async def main():
-#         sample_tags = ["chill", "electronic"]
-#         tracks = await find_tracks_by_tags(sample_tags, limit_per_tag=3)
-#         for track in tracks:
-#             print(f"{track['title']} by {track['artist']}")
-#     asyncio.run(main())
+        top_tags_items = await asyncio.to_thread(track_obj.get_top_tags, limit=5) # Get top 5 tags
+        
+        tags = [tag_item.item.name.lower() for tag_item in top_tags_items if hasattr(tag_item, 'item') and hasattr(tag_item.item, 'name')]
+        
+        # print(f"Last.fm: Tags for '{title}' by '{artist}': {tags}")
+        return tags
+    except pylast.WSError as e:
+        # Common errors: "Track not found" (code 6), "Artist not found"
+        if e.status == '6': # Error 6 often means "not found"
+            print(f"Last.fm: Track or artist not found for '{title}' by '{artist}'. Details: {e.details}")
+        else:
+            print(f"Last.fm API WSError for '{title}' by '{artist}': {e}")
+        return []
+    except Exception as e:
+        print(f"Unexpected error fetching tags from Last.fm for '{title}' by '{artist}': {e}")
+        return []
